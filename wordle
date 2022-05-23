@@ -1,0 +1,176 @@
+#!/usr/bin/env ruby
+
+require 'english'
+
+class WordleHelper
+  SYSTEM_DICTIONARY_PATH = '/usr/share/dict/words'
+  WORD_LENGTH = 5
+  VALID_WORD_REGEX = /\A[a-z]{#{WORD_LENGTH}}\z/
+  BLACKLIST = %w[
+    ileon
+  ]
+
+  attr_reader :dictionary, :word_freqs, :position_freqs, :constraints
+
+  def initialize
+    parse_options!
+    load_dictionary!
+    analyze_dictionary!
+  end
+
+  def suggestions
+    dictionary
+      .select { |word| valid_word? word }
+      .map { |word| {word: word, score: score_word(word)} }
+      .sort { |a, b| b[:score] <=> a[:score] }
+  end
+
+  def run
+    suggestions.first(20).each do |suggestion|
+      printf("%s (%d)\n", suggestion[:word], suggestion[:score])
+    end
+  end
+
+  private
+
+  def valid_word? word
+    # check word constraints
+    chars_to_match = word.chars
+    constraints[:word].each do |constraint|
+      character = constraint[:character]
+      if constraint[:operation] == :inclusion
+        idx = chars_to_match.index character
+        return false unless idx
+        chars_to_match.delete_at idx
+      else
+        count = constraints[:word].count { |other_constraint|
+          other_constraint[:character] == character &&
+            other_constraint[:operation] == :inclusion
+        }
+        return false if word.count(character) != count
+      end
+    end
+    # check position constraints
+    (0..4).each do |position|
+      constraints[position].each do |constraint|
+        if constraint[:operation] == :equality
+          return false if word[position] != constraint[:character]
+        else
+          return false if word[position] == constraint[:character]
+        end
+      end
+    end
+    true
+  end
+
+  def score_word word
+    seen_chars = {}
+    word_score = 0
+
+    word.chars.each.with_index do |char, idx|
+      char_base_score = word_freqs[char]
+      char_position_score = position_freqs[idx][char]
+      char_score = char_base_score + char_position_score
+
+      if seen_chars.key? char
+        next if seen_chars[char] > char_score
+
+        word_score -= seen_chars[char]
+      end
+
+      seen_chars[char] = char_score
+      word_score += char_score
+    end
+
+    word_score
+  end
+
+  def load_dictionary!
+    File.open(SYSTEM_DICTIONARY_PATH, 'r') do |file|
+      dict = []
+      file.each_line do |line|
+        word = line.strip.downcase
+        dict << word if word.match?(VALID_WORD_REGEX) && !BLACKLIST.include?(word)
+      end
+      dict = dict.uniq
+      @dictionary = dict
+    end
+  end
+
+  def analyze_dictionary!
+    @word_freqs = Hash.new(0)
+    @position_freqs = Array.new(WORD_LENGTH, Hash.new(0))
+    @dictionary.each do |word|
+      seen = []
+      word.chars.each.with_index do |char, idx|
+        @word_freqs[char] += 1 unless seen.include?(char)
+        @position_freqs[idx][char] += 1
+        seen << char
+      end
+    end
+  end
+
+  def parse_options!
+    constraints = {word: []}
+    WORD_LENGTH.times { |i| constraints[i] = [] }
+
+    ARGV.each do |arg|
+      case arg
+      when /\A(?<operation>[+\-])(?<chars>[a-z]+)\z/
+        match_data = $LAST_MATCH_INFO
+        operation = match_data[:operation] == '+' ? :inclusion : :exclusion
+        match_data[:chars].chars.each do |char|
+          constraints[:word] << {operation: operation, character: char}
+        end
+      when /\A(?<operation>[=!])(?<char>[a-z])(?<position>[0-4])\z/
+        match_data = $LAST_MATCH_INFO
+        operation = match_data[:operation] == '=' ? :equality : :inequality
+        char = match_data[:char]
+        position = Integer(match_data[:position])
+        constraints[position] << {operation: operation, character: char}
+      else
+        raise "Invalid argument #{arg.inspect}"
+      end
+    end
+
+    @constraints = constraints
+  end
+end
+
+if ARGV.include? '--help'
+  puts <<~USAGE
+    usage: wordle [constraints]
+
+    this tool suggests words to solve wordle puzzles. constraints may be
+    specified to progressively pare down the list of suggestions. suggestions
+    are ranked by their anticipated utility toward filtering out the greatest
+    number of invalid words.
+
+    constraints:
+      + the plus sign introduces letters that must be present in the suggested
+        words. "+abc" means that words must contain the letters "a", "b", and
+        "c". letters may be repeated to indicate that they must appear at least
+        the given number of times.
+
+      - the minus sign introduces letters that must not be present in the
+        suggested words. "-xyz" means that words must not contain the letters
+        "x", "y", or "z". if a letter is introduced by both "+" and "-", this
+        indicates that words must contain exactly the specified number of the
+        given letter. for example, "+aaa -a" means that words must contain
+        exactly 3 instances of the letter "a".
+
+      = the equals sign introduces a known-correct letter-position pair.
+        positions are zero-indexed. "=a0" means that words must begin with the
+        letter "a".
+
+      ! the exclamation point prefix introduces a known-incorrect word-position
+        pair. positions are zero-indexed. "!z4" means that words must not end
+        with the letter "z".
+
+    constraints may be repeated any number of times in any order, and are
+    additive.
+  USAGE
+  exit 0
+end
+
+WordleHelper.new.run
